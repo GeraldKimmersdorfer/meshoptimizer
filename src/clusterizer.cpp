@@ -670,6 +670,147 @@ size_t meshopt_buildMeshlets(meshopt_Meshlet* meshlets, unsigned int* meshlet_ve
 	return meshlet_offset;
 }
 
+size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles,
+	const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride,
+	size_t max_vertices, size_t max_triangles, float cone_weight,
+    MESHLET_FUNC_FEEDBACK func)
+{
+	using namespace meshopt;
+
+	assert(index_count % 3 == 0);
+	assert(vertex_positions_stride >= 12 && vertex_positions_stride <= 256);
+	assert(vertex_positions_stride % sizeof(float) == 0);
+
+	assert(max_vertices >= 3 && max_vertices <= kMeshletMaxVertices);
+	assert(max_triangles >= 1 && max_triangles <= kMeshletMaxTriangles);
+	assert(max_triangles % 4 == 0); // ensures the caller will compute output space properly as index data is 4b aligned
+
+	assert(cone_weight >= 0 && cone_weight <= 1);
+
+	meshopt_Allocator allocator;
+
+	TriangleAdjacency2 adjacency = {};
+	buildTriangleAdjacency(adjacency, indices, index_count, vertex_count, allocator);
+
+	unsigned int* live_triangles = allocator.allocate<unsigned int>(vertex_count);
+	memcpy(live_triangles, adjacency.counts, vertex_count * sizeof(unsigned int));
+
+	size_t face_count = index_count / 3;
+
+	unsigned char* emitted_flags = allocator.allocate<unsigned char>(face_count);
+	memset(emitted_flags, 0, face_count);
+
+	// for each triangle, precompute centroid & normal to use for scoring
+	Cone* triangles = allocator.allocate<Cone>(face_count);
+	float mesh_area = computeTriangleCones(triangles, indices, index_count, vertex_positions, vertex_count, vertex_positions_stride);
+
+	// assuming each meshlet is a square patch, expected radius is sqrt(expected area)
+	float triangle_area_avg = face_count == 0 ? 0.f : mesh_area / float(face_count) * 0.5f;
+	float meshlet_expected_radius = sqrtf(triangle_area_avg * max_triangles) * 0.5f;
+
+	// build a kd-tree for nearest neighbor lookup
+	unsigned int* kdindices = allocator.allocate<unsigned int>(face_count);
+	for (size_t i = 0; i < face_count; ++i)
+		kdindices[i] = unsigned(i);
+
+	KDNode* nodes = allocator.allocate<KDNode>(face_count * 2);
+	kdtreeBuild(0, nodes, face_count * 2, &triangles[0].px, sizeof(Cone) / sizeof(float), kdindices, face_count, /* leaf_size= */ 8);
+
+	// index of the vertex in the meshlet, 0xff if the vertex isn't used
+	unsigned char* used = allocator.allocate<unsigned char>(vertex_count);
+	memset(used, -1, vertex_count);
+
+	meshopt_Meshlet meshlet = {};
+	size_t meshlet_offset = 0;
+
+	Cone meshlet_cone_acc = {};
+
+	for (;;)
+	{
+		Cone meshlet_cone = getMeshletCone(meshlet_cone_acc, meshlet.triangle_count);
+
+		unsigned int best_extra = 0;
+		unsigned int best_triangle = getNeighborTriangle(meshlet, &meshlet_cone, meshlet_vertices, indices, adjacency, triangles, live_triangles, used, meshlet_expected_radius, cone_weight, &best_extra);
+
+		// if the best triangle doesn't fit into current meshlet, the spatial scoring we've used is not very meaningful, so we re-select using topological scoring
+		if (best_triangle != ~0u && (meshlet.vertex_count + best_extra > max_vertices || meshlet.triangle_count >= max_triangles))
+		{
+			best_triangle = getNeighborTriangle(meshlet, NULL, meshlet_vertices, indices, adjacency, triangles, live_triangles, used, meshlet_expected_radius, 0.f, NULL);
+		}
+
+		// when we run out of neighboring triangles we need to switch to spatial search; we currently just pick the closest triangle irrespective of connectivity
+		if (best_triangle == ~0u)
+		{
+			float position[3] = {meshlet_cone.px, meshlet_cone.py, meshlet_cone.pz};
+			unsigned int index = ~0u;
+			float limit = FLT_MAX;
+
+			kdtreeNearest(nodes, 0, &triangles[0].px, sizeof(Cone) / sizeof(float), emitted_flags, position, index, limit);
+
+			best_triangle = index;
+		}
+
+		if (best_triangle == ~0u)
+			break;
+
+		unsigned int a = indices[best_triangle * 3 + 0], b = indices[best_triangle * 3 + 1], c = indices[best_triangle * 3 + 2];
+		assert(a < vertex_count && b < vertex_count && c < vertex_count);
+
+		// add meshlet to the output; when the current meshlet is full we reset the accumulated bounds
+		if (appendMeshlet(meshlet, a, b, c, used, meshlets, meshlet_vertices, meshlet_triangles, meshlet_offset, max_vertices, max_triangles))
+		{
+			meshlet_offset++;
+			memset(&meshlet_cone_acc, 0, sizeof(meshlet_cone_acc));
+		}
+
+		live_triangles[a]--;
+		live_triangles[b]--;
+		live_triangles[c]--;
+
+		// remove emitted triangle from adjacency data
+		// this makes sure that we spend less time traversing these lists on subsequent iterations
+		for (size_t k = 0; k < 3; ++k)
+		{
+			unsigned int index = indices[best_triangle * 3 + k];
+
+			unsigned int* neighbors = &adjacency.data[0] + adjacency.offsets[index];
+			size_t neighbors_size = adjacency.counts[index];
+
+			for (size_t i = 0; i < neighbors_size; ++i)
+			{
+				unsigned int tri = neighbors[i];
+
+				if (tri == best_triangle)
+				{
+					neighbors[i] = neighbors[neighbors_size - 1];
+					adjacency.counts[index]--;
+					break;
+				}
+			}
+		}
+
+		// update aggregated meshlet cone data for scoring subsequent triangles
+		meshlet_cone_acc.px += triangles[best_triangle].px;
+		meshlet_cone_acc.py += triangles[best_triangle].py;
+		meshlet_cone_acc.pz += triangles[best_triangle].pz;
+		meshlet_cone_acc.nx += triangles[best_triangle].nx;
+		meshlet_cone_acc.ny += triangles[best_triangle].ny;
+		meshlet_cone_acc.nz += triangles[best_triangle].nz;
+
+		emitted_flags[best_triangle] = 1;
+	}
+
+	if (meshlet.triangle_count)
+	{
+		finishMeshlet(meshlet, meshlet_triangles);
+
+		meshlets[meshlet_offset++] = meshlet;
+	}
+
+	assert(meshlet_offset <= meshopt_buildMeshletsBound(index_count, max_vertices, max_triangles));
+	return meshlet_offset;
+}
+
 size_t meshopt_buildMeshletsScan(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const unsigned int* indices, size_t index_count, size_t vertex_count, size_t max_vertices, size_t max_triangles)
 {
 	using namespace meshopt;
