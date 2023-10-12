@@ -29,7 +29,8 @@
 #endif
 #endif
 
-#define MESHLET_FUNC_FEEDBACK const std::function<float(uint32_t, uint32_t)>&
+#define MESHLET_FUNC_FEEDBACK const uint32_t* vertex_groups, int max_vertex_groups_per_meshlet
+#define MESHLET_FUNC_FEEDBACK_FORWARD vertex_groups, max_vertex_groups_per_meshlet
 
 /* Experimental APIs have unstable interface and might have implementation that's not fully tested or optimized */
 #define MESHOPTIMIZER_EXPERIMENTAL MESHOPTIMIZER_API
@@ -489,7 +490,7 @@ struct meshopt_Meshlet
  * cone_weight should be set to 0 when cone culling is not used, and a value between 0 and 1 otherwise to balance between cluster size and cone culling efficiency
  */
 MESHOPTIMIZER_API size_t meshopt_buildMeshlets(struct meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight);
-MESHOPTIMIZER_API size_t meshopt_buildMeshlets_feedback(struct meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK func);
+MESHOPTIMIZER_API size_t meshopt_buildMeshlets_feedback(struct meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK);
 MESHOPTIMIZER_API size_t meshopt_buildMeshletsScan(struct meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const unsigned int* indices, size_t index_count, size_t vertex_count, size_t max_vertices, size_t max_triangles);
 MESHOPTIMIZER_API size_t meshopt_buildMeshletsBound(size_t index_count, size_t max_vertices, size_t max_triangles);
 
@@ -664,7 +665,7 @@ inline meshopt_VertexFetchStatistics meshopt_analyzeVertexFetch(const T* indices
 template <typename T>
 inline size_t meshopt_buildMeshlets(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight);
 template <typename T>
-inline size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK func);
+inline size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK);
 template <typename T>
 inline size_t meshopt_buildMeshletsScan(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, const T* indices, size_t index_count, size_t vertex_count, size_t max_vertices, size_t max_triangles);
 template <typename T>
@@ -1027,11 +1028,11 @@ inline size_t meshopt_buildMeshlets(meshopt_Meshlet* meshlets, unsigned int* mes
 template <typename T>
 inline size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles,
 	const T* indices, size_t index_count, const float* vertex_positions,
-    size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK func)
+    size_t vertex_count, size_t vertex_positions_stride, size_t max_vertices, size_t max_triangles, float cone_weight, MESHLET_FUNC_FEEDBACK)
 {
 	meshopt_IndexAdapter<T> in(0, indices, index_count);
 
-	return meshopt_buildMeshlets_feedback(meshlets, meshlet_vertices, meshlet_triangles, in.data, index_count, vertex_positions, vertex_count, vertex_positions_stride, max_vertices, max_triangles, cone_weight, func);
+	return meshopt_buildMeshlets_feedback(meshlets, meshlet_vertices, meshlet_triangles, in.data, index_count, vertex_positions, vertex_count, vertex_positions_stride, max_vertices, max_triangles, cone_weight, MESHLET_FUNC_FEEDBACK_FORWARD);
 }
 
 template <typename T>

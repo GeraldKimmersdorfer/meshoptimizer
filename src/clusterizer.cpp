@@ -5,6 +5,7 @@
 #include <float.h>
 #include <math.h>
 #include <string.h>
+#include <iostream>
 
 // This work is based on:
 // Graham Wihlidal. Optimizing the Graphics Pipeline with Compute. 2016
@@ -284,6 +285,81 @@ static bool appendMeshlet(meshopt_Meshlet& meshlet, unsigned int a, unsigned int
 }
 
 static unsigned int getNeighborTriangle(const meshopt_Meshlet& meshlet, const Cone* meshlet_cone, unsigned int* meshlet_vertices, const unsigned int* indices, const TriangleAdjacency2& adjacency, const Cone* triangles, const unsigned int* live_triangles, const unsigned char* used, float meshlet_expected_radius, float cone_weight, unsigned int* out_extra)
+{
+	unsigned int best_triangle = ~0u;
+	unsigned int best_extra = 5;
+	float best_score = FLT_MAX;
+
+	for (size_t i = 0; i < meshlet.vertex_count; ++i)
+	{
+		unsigned int index = meshlet_vertices[meshlet.vertex_offset + i];
+
+		unsigned int* neighbors = &adjacency.data[0] + adjacency.offsets[index];
+		size_t neighbors_size = adjacency.counts[index];
+
+		for (size_t j = 0; j < neighbors_size; ++j)
+		{
+			unsigned int triangle = neighbors[j];
+			unsigned int a = indices[triangle * 3 + 0], b = indices[triangle * 3 + 1], c = indices[triangle * 3 + 2];
+
+			unsigned int extra = (used[a] == 0xff) + (used[b] == 0xff) + (used[c] == 0xff);
+
+			// triangles that don't add new vertices to meshlets are max. priority
+			if (extra != 0)
+			{
+				// artificially increase the priority of dangling triangles as they're expensive to add to new meshlets
+				if (live_triangles[a] == 1 || live_triangles[b] == 1 || live_triangles[c] == 1)
+					extra = 0;
+
+				extra++;
+			}
+
+			// since topology-based priority is always more important than the score, we can skip scoring in some cases
+			if (extra > best_extra)
+				continue;
+
+			float score = 0;
+
+			// caller selects one of two scoring functions: geometrical (based on meshlet cone) or topological (based on remaining triangles)
+			if (meshlet_cone)
+			{
+				const Cone& tri_cone = triangles[triangle];
+
+				float distance2 =
+				    (tri_cone.px - meshlet_cone->px) * (tri_cone.px - meshlet_cone->px) +
+				    (tri_cone.py - meshlet_cone->py) * (tri_cone.py - meshlet_cone->py) +
+				    (tri_cone.pz - meshlet_cone->pz) * (tri_cone.pz - meshlet_cone->pz);
+
+				float spread = tri_cone.nx * meshlet_cone->nx + tri_cone.ny * meshlet_cone->ny + tri_cone.nz * meshlet_cone->nz;
+
+				score = getMeshletScore(distance2, spread, cone_weight, meshlet_expected_radius);
+			}
+			else
+			{
+				// each live_triangles entry is >= 1 since it includes the current triangle we're processing
+				score = float(live_triangles[a] + live_triangles[b] + live_triangles[c] - 3);
+			}
+
+			// note that topology-based priority is always more important than the score
+			// this helps maintain reasonable effectiveness of meshlet data and reduces scoring cost
+			if (extra < best_extra || score < best_score)
+			{
+				best_triangle = triangle;
+				best_extra = extra;
+				best_score = score;
+			}
+		}
+	}
+
+	if (out_extra)
+		*out_extra = best_extra;
+
+	return best_triangle;
+}
+
+static unsigned int getNeighborTriangle_feedback(const meshopt_Meshlet& meshlet, const Cone* meshlet_cone, unsigned int* meshlet_vertices,
+	const unsigned int* indices, const TriangleAdjacency2& adjacency, const Cone* triangles, const unsigned int* live_triangles,
+	const unsigned char* used, float meshlet_expected_radius, float cone_weight, unsigned int* out_extra, MESHLET_FUNC_FEEDBACK)
 {
 	unsigned int best_triangle = ~0u;
 	unsigned int best_extra = 5;
@@ -673,7 +749,7 @@ size_t meshopt_buildMeshlets(meshopt_Meshlet* meshlets, unsigned int* meshlet_ve
 size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* meshlet_vertices, unsigned char* meshlet_triangles,
 	const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride,
 	size_t max_vertices, size_t max_triangles, float cone_weight,
-    MESHLET_FUNC_FEEDBACK func)
+    MESHLET_FUNC_FEEDBACK)
 {
 	using namespace meshopt;
 
@@ -686,6 +762,11 @@ size_t meshopt_buildMeshlets_feedback(meshopt_Meshlet* meshlets, unsigned int* m
 	assert(max_triangles % 4 == 0); // ensures the caller will compute output space properly as index data is 4b aligned
 
 	assert(cone_weight >= 0 && cone_weight <= 1);
+
+	if (max_vertex_groups_per_meshlet < 3)
+	{
+		std::cout << "WARNING: max_vertex_groups_per_meshlet smaller than 3 can cause triangles to not fit partners during meshlet creation" << std::endl;
+	}
 
 	meshopt_Allocator allocator;
 
